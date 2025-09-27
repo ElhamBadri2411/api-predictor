@@ -14,8 +14,6 @@ app = FastAPI(
 @app.get("/health")
 async def health():
     """Health check"""
-    generator = TrainingDataGenerator()
-    print(generator.generate_training_samples())
     return {"status": "healthy"}
 
 
@@ -42,4 +40,3 @@ async def predict(request: PredictRequest):
     except Exception as e:
         print(f"Error in prediction: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
