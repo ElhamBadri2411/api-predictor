@@ -26,4 +26,3 @@ class Prediction(BaseModel):
 
 class PredictResponse(BaseModel):
     predictions: List[Prediction]
-
