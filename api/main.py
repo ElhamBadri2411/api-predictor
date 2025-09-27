@@ -1,6 +1,8 @@
 import time
 from fastapi import FastAPI, HTTPException
-from api.models import PredictRequest, PredictResponse, Prediction, Event
+from api.models import PredictRequest, PredictResponse, Prediction
+from ml.data_generator import TrainingDataGenerator
+
 
 app = FastAPI(
     title="API Call Predictor",
@@ -12,6 +14,8 @@ app = FastAPI(
 @app.get("/health")
 async def health():
     """Health check"""
+    generator = TrainingDataGenerator()
+    print(generator.generate_training_samples())
     return {"status": "healthy"}
 
 

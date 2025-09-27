@@ -245,11 +245,17 @@ class TrainingDataGenerator:
         resource_map = {
             "resource": chosen_resources[0],
             "resource1": chosen_resources[0],
-            "resource2": chosen_resources[1] if len(chosen_resources) > 1 else chosen_resources[0],
-            "resource3": chosen_resources[2] if len(chosen_resources) > 2 else chosen_resources[0],
+            "resource2": chosen_resources[1]
+            if len(chosen_resources) > 1
+            else chosen_resources[0],
+            "resource3": chosen_resources[2]
+            if len(chosen_resources) > 2
+            else chosen_resources[0],
             "subresource": chosen_subresources[0],
             "detail1": chosen_subresources[0],
-            "detail2": chosen_subresources[1] if len(chosen_subresources) > 1 else chosen_subresources[0],
+            "detail2": chosen_subresources[1]
+            if len(chosen_subresources) > 1
+            else chosen_subresources[0],
         }
 
         # Generate IDs
