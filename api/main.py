@@ -1,3 +1,4 @@
+import time
 from fastapi import FastAPI, HTTPException
 from api.models import PredictRequest, PredictResponse, Prediction, Event
 
@@ -12,3 +13,29 @@ app = FastAPI(
 async def health():
     """Health check"""
     return {"status": "healthy"}
+
+
+@app.post("/predict")
+async def predict(request: PredictRequest):
+    start_time = time.time()
+    print(request)
+
+    try:
+        mock_predictions = [
+            Prediction(
+                endpoint="GET /api/placeholder",
+                params={},
+                score=0.5,
+                why="Mock prediction",
+            )
+        ]
+
+        elapsed = time.time() - start_time
+        print(f"Request processed in {elapsed:.2f}s")
+
+        return PredictResponse(predictions=mock_predictions)
+
+    except Exception as e:
+        print(f"Error in prediction: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
