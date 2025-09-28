@@ -1,8 +1,8 @@
 {
   "model_type": "Logistic Regression",
-  "test_accuracy": 0.768,
-  "auc_score": 0.8629826956455204,
-  "avg_inference_ms": 0.17138361930847168,
+  "test_accuracy": 0.7936,
+  "auc_score": 0.8804841462416395,
+  "avg_inference_ms": 0.16292572021484375,
   "model_size_mb": 0.0010786056518554688,
   "meets_speed_requirement": true
 }

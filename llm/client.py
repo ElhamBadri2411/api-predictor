@@ -12,18 +12,26 @@ Optimized for speed and accuracy in API prediction scenarios.
 import httpx
 import json
 import os
+from dotenv import load_dotenv
 import asyncio
 import yaml
 from typing import List, Dict, Optional, Any
 import re
+import time
+import hashlib
 from urllib.parse import urlparse
+from pathlib import Path
+
+load_dotenv()
 
 
 class OpenRouterClient:
     """OpenRouter API client for generating API call candidates"""
 
     def __init__(
-        self, api_key: Optional[str] = None, model: str = "openai/gpt-3.5-turbo"
+        self,
+        api_key: Optional[str] = None,
+        model: str = "openai/gpt-3.5-turbo-instruct",
     ):
         """Initialize OpenRouter client
 
@@ -41,9 +49,15 @@ class OpenRouterClient:
         self.model = model
 
         # Request settings optimized for speed
-        self.timeout = 10.0
-        self.max_tokens = 1500  # Limit for faster responses
-        self.temperature = 0.7  # Balanced creativity
+        self.timeout = 5.0  # Reduced timeout
+        self.max_tokens = 800  # Reduced for faster responses
+        self.temperature = 0.3  # Lower for more deterministic/faster responses
+
+        # Spec caching
+        self.cache_dir = Path("/tmp/api_specs")
+        self.cache_dir.mkdir(exist_ok=True)
+        self.spec_cache = {}  # In-memory cache
+        self.cache_ttl = 3600  # 1 hour TTL
 
     async def generate_candidates(
         self,
@@ -65,43 +79,125 @@ class OpenRouterClient:
         """
 
         try:
-            # Load and parse OpenAPI spec
-            endpoints = await self._load_api_endpoints(spec_url)
+            start_time = time.time()
+            print(f"[LLM] CLIENT START")
 
-            # Build LLM prompt
-            llm_prompt = self._build_prompt(endpoints, events, prompt, n)
+            # Parallel execution: Load spec and build prompt concurrently
+            spec_start = time.time()
+            endpoints_task = asyncio.create_task(
+                self._load_api_endpoints_cached(spec_url)
+            )
+
+            # Start building prompt with available data while spec loads
+            prompt_start = time.time()
+            prompt_data = self._prepare_prompt_data(events, prompt, n)
+            print(f"[TIMING] PROMPT PREP: {(time.time() - prompt_start) * 1000:.1f}ms")
+
+            # Wait for spec loading to complete
+            endpoints = await endpoints_task
+            print(f"[TIMING] SPEC LOAD: {(time.time() - spec_start) * 1000:.1f}ms")
+
+            # Build final prompt
+            build_start = time.time()
+            llm_prompt = self._build_prompt_fast(endpoints, prompt_data)
+            print(f"[TIMING] PROMPT BUILD: {(time.time() - build_start) * 1000:.1f}ms")
 
             # Call OpenRouter
+            llm_start = time.time()
             candidates = await self._call_openrouter(llm_prompt, n)
+            print(f"[TIMING] OPENROUTER API: {(time.time() - llm_start) * 1000:.1f}ms")
 
             # Validate and clean candidates
-            return self._validate_candidates(candidates, endpoints)
+            validate_start = time.time()
+            result = self._validate_candidates(candidates, endpoints)
+            print(f"[TIMING] VALIDATE: {(time.time() - validate_start) * 1000:.1f}ms")
+
+            print(f"[LLM] TOTAL: {(time.time() - start_time) * 1000:.1f}ms")
+            return result
 
         except Exception as e:
             print(f"Error generating candidates: {e}")
             # Return fallback candidates
             return self._generate_fallback_candidates(events, n)
 
-    async def _load_api_endpoints(self, spec_url: str) -> List[str]:
-        """Load and extract endpoints from OpenAPI spec"""
+    async def _load_api_endpoints_cached(self, spec_url: str) -> List[str]:
+        """Load and extract endpoints from OpenAPI spec with caching"""
 
+        # Generate cache key
+        cache_key = hashlib.md5(spec_url.encode()).hexdigest()
+        cache_file = self.cache_dir / f"{cache_key}.json"
+
+        # Check in-memory cache first
+        if cache_key in self.spec_cache:
+            cached_data = self.spec_cache[cache_key]
+            if time.time() - cached_data["timestamp"] < self.cache_ttl:
+                return cached_data["endpoints"]
+
+        # Check disk cache
+        if cache_file.exists():
+            try:
+                with open(cache_file, "r") as f:
+                    cached_data = json.load(f)
+                    if time.time() - cached_data["timestamp"] < self.cache_ttl:
+                        # Update in-memory cache
+                        self.spec_cache[cache_key] = cached_data
+                        return cached_data["endpoints"]
+            except:
+                pass  # Ignore cache errors, fetch fresh
+
+        # Fetch fresh data - JSON only for speed!
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(spec_url)
-                response.raise_for_status()
-
-            # Parse based on file extension
+            # Convert YAML URLs to JSON URLs for 70x faster parsing
             if spec_url.endswith((".yaml", ".yml")):
-                spec = yaml.safe_load(response.text)
+                json_url = spec_url.replace(".yaml", ".json").replace(".yml", ".json")
+                print(f"[SPEC] Converting to JSON: {json_url}")
+                actual_url = json_url
             else:
-                spec = json.loads(response.text)
+                actual_url = spec_url
+                print(f"[SPEC] Using JSON URL: {actual_url}")
 
-            return self._extract_endpoints_from_spec(spec)
+            # Download JSON version
+            download_start = time.time()
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(actual_url)
+                response.raise_for_status()
+            print(f"[TIMING] DOWNLOAD: {(time.time() - download_start) * 1000:.1f}ms")
+
+            # Parse JSON (70x faster than YAML!)
+            parse_start = time.time()
+            spec = json.loads(response.text)
+            print(f"[SPEC] JSON parsing successful")
+            print(f"[TIMING] PARSE: {(time.time() - parse_start) * 1000:.1f}ms")
+
+            extract_start = time.time()
+            endpoints = self._extract_endpoints_from_spec(spec)
+            print(f"[TIMING] EXTRACT: {(time.time() - extract_start) * 1000:.1f}ms")
+
+            # Cache the results
+            cache_data = {
+                "endpoints": endpoints,
+                "timestamp": time.time(),
+                "url": spec_url,
+            }
+
+            # Update both caches
+            self.spec_cache[cache_key] = cache_data
+            try:
+                with open(cache_file, "w") as f:
+                    json.dump(cache_data, f)
+            except:
+                pass  # Ignore cache write errors
+
+            return endpoints
 
         except Exception as e:
             print(f"Warning: Failed to load OpenAPI spec from {spec_url}: {e}")
             # Return common REST endpoints as fallback
             return self._get_fallback_endpoints()
+
+    async def _load_api_endpoints(self, spec_url: str) -> List[str]:
+        """Legacy method - redirects to cached version"""
+        return await self._load_api_endpoints_cached(spec_url)
 
     def _extract_endpoints_from_spec(self, spec: Dict) -> List[str]:
         """Extract all endpoints from OpenAPI specification"""
@@ -200,6 +296,66 @@ Generate {n} candidates now:"""
 
         return user_prompt
 
+    def _prepare_prompt_data(
+        self, events: List[Dict], prompt: Optional[str], n: int
+    ) -> Dict:
+        """Prepare prompt data that doesn't require the spec"""
+
+        # Format recent events
+        recent_events = events[-5:] if len(events) > 5 else events
+        history_text = "\n".join([f"- {event['endpoint']}" for event in recent_events])
+
+        # User intent
+        intent_text = (
+            f'User intent: "{prompt}"' if prompt else "No specific user intent provided"
+        )
+
+        return {
+            "recent_events": recent_events,
+            "history_text": history_text,
+            "intent_text": intent_text,
+            "n": n,
+        }
+
+    def _build_prompt_fast(self, endpoints: List[str], prompt_data: Dict) -> str:
+        """Build optimized prompt using pre-prepared data"""
+
+        # Select most relevant endpoints
+        relevant_endpoints = self._select_relevant_endpoints(
+            endpoints, prompt_data["recent_events"]
+        )
+        endpoints_text = "\n".join([f"- {ep}" for ep in relevant_endpoints])
+
+        system_prompt = """You are an expert API prediction assistant. Generate the most likely next API calls based on common REST patterns and user behavior."""
+
+        user_prompt = f"""
+API ENDPOINTS AVAILABLE:
+{endpoints_text}
+
+RECENT API CALL HISTORY:
+{prompt_data["history_text"]}
+
+{prompt_data["intent_text"]}
+
+TASK: Generate exactly {prompt_data["n"]} most likely next API calls the user will make.
+
+RULES:
+1. Follow logical REST API patterns (list→detail, create→view, update→view, etc.)
+2. Consider the user's intent if provided
+3. Prioritize safe operations (GET, POST) over destructive ones (DELETE)
+4. Use realistic parameter values when needed
+5. Provide brief reasoning for each suggestion
+
+OUTPUT FORMAT (JSON only, no other text):
+[
+  {{"endpoint": "GET /api/resource", "params": {{}}, "reasoning": "Brief explanation"}},
+  {{"endpoint": "POST /api/resource", "params": {{"key": "value"}}, "reasoning": "Brief explanation"}}
+]
+
+Generate {prompt_data["n"]} candidates now:"""
+
+        return user_prompt
+
     def _select_relevant_endpoints(
         self, endpoints: List[str], recent_events: List[Dict]
     ) -> List[str]:
@@ -242,19 +398,15 @@ Generate {n} candidates now:"""
         return ""
 
     async def _call_openrouter(self, prompt: str, n: int) -> List[Dict]:
-        """Make request to OpenRouter API"""
+        """Make request to OpenRouter API using fast instruct model"""
 
-        messages = [
-            {
-                "role": "system",
-                "content": "You are an expert API prediction assistant. Generate the most likely next API calls based on common REST patterns and user behavior.",
-            },
-            {"role": "user", "content": prompt},
-        ]
+        # Use instruct model with completions endpoint for speed
+        system_instruction = "You are an expert API prediction assistant. Generate the most likely next API calls based on common REST patterns and user behavior.\n\n"
+        full_prompt = system_instruction + prompt
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
-                f"{self.base_url}/chat/completions",
+                f"{self.base_url}/completions",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "HTTP-Referer": "http://localhost:8000",
@@ -262,10 +414,11 @@ Generate {n} candidates now:"""
                 },
                 json={
                     "model": self.model,
-                    "messages": messages,
+                    "prompt": full_prompt,
                     "temperature": self.temperature,
                     "max_tokens": self.max_tokens,
                     "top_p": 0.9,
+                    "stop": ["\n\n", "Human:", "Assistant:"],
                 },
             )
 
@@ -275,7 +428,7 @@ Generate {n} candidates now:"""
             )
 
         result = response.json()
-        content = result["choices"][0]["message"]["content"]
+        content = result["choices"][0]["text"]
 
         # Parse JSON response
         try:
@@ -511,4 +664,3 @@ async def test_client():
 
 if __name__ == "__main__":
     asyncio.run(test_client())
-
